@@ -1,0 +1,1 @@
+<opensim.simbody.RowVectorRotation; proxy of <Swig Object of type 'SimTK::RowVector_< SimTK::Rotation_< double > > *' at 0x0000014FC7761DA0> >
