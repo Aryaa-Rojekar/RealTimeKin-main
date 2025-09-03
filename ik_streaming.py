@@ -3,7 +3,7 @@
 import opensim as osim
 from opensim import Vec3
 import numpy as np
-from helper import quat2sto_single, sto2quat
+from helper import quat2sto_single, sto2quat, quat2sto_append
 import helper as h
 import time
 import os
@@ -29,7 +29,7 @@ def main():
     fake_real_time = True # True to run offline, False to record data and run online
     log_temp = True # True to log CPU temperature data
     log_data = True # if true save all IK outputs, else only use those in reporter_list for easier custom coding
-    home_dir = ("C:/Users/aryaa/Desktop/research/base_code/RealTimeKin-main/") # location of the main RealTimeKin folder
+    home_dir = ("C:/Users/laure/Box/Lauren-Projects/NML/Code/RealTimeKin/RealTimeKin-main/") # location of the main RealTimeKin folder
     uncal_model = 'Rajagopal_2015.osim'
     uncal_model_filename = home_dir + uncal_model
     model_filename = home_dir+'calibrated_' + uncal_model
@@ -50,9 +50,11 @@ def main():
     ts_file = '/timestamp_'
     script_live = True
 
+    #set whether to use VQF 
+    use_vqf = False
     q = Queue() # queue for IMU messages
     b = Queue() # queue for button messages
-    imuProc = Process(target=workers.readIMU, args=(q, b, fake_online_data, init_time, signals_per_sensor, save_dir_init,home_dir))
+    imuProc = Process(target=workers.readIMU, args=(q, b, fake_online_data, init_time, signals_per_sensor, save_dir_init,home_dir,use_vqf))
     imuProc.start() # spawning IMU process
     sensor_ind_list, rate, header_text, save_folder, save_folder, file_cnt, sim_len, fake_real_time, fake_data_len = b.get()
     save_dir = save_dir_init+save_folder+'/' # append the folder name here
@@ -73,12 +75,21 @@ def main():
         init_time, Qi, head_err = q.get()
         # calibrate model and save
         quat2sto_single(Qi, header_text, sto_filename, 0., rate, sensor_ind_list)
+
+        quat2sto_append(Qi, header_text, sto_filename.replace(".sto","_full.sto"), 0., rate, sensor_ind_list,first=True)
         visualize_init = False
-        sensor_to_opensim_rotations = Vec3(-np.pi/2,head_err,0)
+
+        #sensor_to_opensim_rotations = Vec3(-np.pi/2,head_err,0) #testing something
+        print(Qi)
+        sensor_to_opensim_rotations = Vec3(0,0,0)
+        #sensor_to_opensim_rotations = Vec3(0,0,0)
+        #import pdb; pdb.set_trace()
         imuPlacer = osim.IMUPlacer()
         imuPlacer.set_model_file(uncal_model_filename)
         imuPlacer.set_orientation_file_for_calibration(sto_filename)
         imuPlacer.set_sensor_to_opensim_rotations(sensor_to_opensim_rotations)
+        imuPlacer.set_base_imu_label("pelvis_imu")      # must match label in orientations file
+        imuPlacer.set_base_heading_axis("x")
         imuPlacer.run(visualize_init)
         model = imuPlacer.getCalibratedModel()
         model.printToXML(model_filename)
@@ -115,6 +126,7 @@ def main():
         if visualize: # initialize visualization
             model.getVisualizer().show(s0)
             model.getVisualizer().getSimbodyVisualizer().setShowSimTime(True)
+            model.getVisualizer().getSimbodyVisualizer().setShutdownWhenDestructed(True)
 
         # IK solver loop
         t = 0 # number of steps
@@ -154,11 +166,22 @@ def main():
             time_stamp, Qi = q.get()
             add_time = time.time()
             time_s = t*dt
+
             
             quat2sto_single(Qi, header_text, sto_filename, time_s+dt, rate, sensor_ind_list) # store next line of fake online data to one-line STO
+            quat2sto_append(Qi, header_text, sto_filename.replace(".sto","_full.sto"), 0., rate, sensor_ind_list)
             
             # IK
             quatTable = osim.TimeSeriesTableQuaternion(sto_filename)
+
+            sensor2osim = osim.Rotation(osim.SpaceRotationSequence,float(0),
+        osim.CoordinateAxis(0),
+        float(0),
+        osim.CoordinateAxis(1),
+        float(0),
+        osim.CoordinateAxis(2))
+
+            osim.OpenSenseUtilities.rotateOrientationTable(quatTable, sensor2osim)
 
             ikSolver = osim.InverseKinematicsSolver(model, mRefs, osim.OrientationsReference(osim.OpenSenseUtilities.convertQuaternionsToRotations(quatTable)), coordinateReferences, constraint_var)
             ikSolver.setAccuracy = accuracy
@@ -184,12 +207,12 @@ def main():
             model.realizePosition(s0)
 
             if visualize:
-                model.getVisualizer().show(s0)
+                 model.getVisualizer().show(s0)
             model.realizeReport(s0)
             if not real_time: # The previous kinematics are pulled here and can be used to implement any custom real-time applications. this has been changed so we see what it does
                 rowind = ikReporter.getTable().getRowIndexBeforeTime((t+1)*dt) # most recent index in kinematics table
                 kin_step = ikReporter.getTable().getRowAtIndex(rowind).to_numpy() # joint angles for current time step as numpy array
-                print(kin_step)
+                #print(kin_step)
                 # see the header of the saved .sto files for the names of the corresponding joints.
                 ### ADD CUSTOM CODE HERE FOR REAL-TIME APPLICATIONS ###
 

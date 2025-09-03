@@ -4,13 +4,14 @@ import sys
 import ahrs
 import numpy as np
 import os
+import vqf
 
 def parallelIK(ikSolver, s0, ik, time_stamp):
     ikSolver.track(s0)
     ik.put([time.time()-time_stamp])
     time.sleep(0.005)
 
-def readIMU(q, b, fake_online_data, init_time, signals_per_sensor, save_dir_init,home_dir):
+def readIMU(q, b, fake_online_data, init_time, signals_per_sensor, save_dir_init,home_dir,useVQF=False):
     # Load the initialization information about the sensors
     tca_inds = []
     num_parts = 0
@@ -21,7 +22,7 @@ def readIMU(q, b, fake_online_data, init_time, signals_per_sensor, save_dir_init
     sim_len = 600
     # Defining the external signal trigger
     imu_only = False
-    with open("C:/Users/aryaa/Desktop/research/base_code/RealTimeKin-main\settings.txt", 'r') as f:
+    with open(os.path.join(fake_online_data,"settings.txt"), 'r') as f:
         for cnt, line in enumerate(f):
             old_lines.append(line)
             if cnt == 0:
@@ -33,6 +34,7 @@ def readIMU(q, b, fake_online_data, init_time, signals_per_sensor, save_dir_init
                     print("Wrong number of tca_indeces given, doesn't match number of body parts.")
                 alt_address_list = []
                 tca_inds = tca_inds[:-1]
+                print(tca_inds)
                 for i in range(len(tca_inds)):
                     if len(tca_inds[i]) == 1: # alternate
                         tca_inds[i] = int(tca_inds[i])
@@ -115,6 +117,7 @@ def readIMU(q, b, fake_online_data, init_time, signals_per_sensor, save_dir_init
     sensor_rot_type = [0,0,1,1,3,2,2,3,1,1,1,2,2,2] # define rotation types
     sensor_labels_full = ['pelvis_imu','torso_imu','femur_l_imu','tibia_l_imu','calcn_l_imu','femur_r_imu','tibia_r_imu','calcn_r_imu','humerus_l_imu','ulna_l_imu','hand_l_imu','humerus_r_imu','ulna_r_imu','hand_r_imu']
     sensor_label_list = []
+    print(sensor_inds)
     for i, s_ind in enumerate(sensor_inds):
         if s_ind != 9:
             if not fake_real_time:
@@ -129,7 +132,7 @@ def readIMU(q, b, fake_online_data, init_time, signals_per_sensor, save_dir_init
             sensor_cnt += 1
             sensor_rot.append(sensor_rot_type[i]) # say for this number sensor how to rotate it
             sensor_label_list.append(sensor_labels_full[i])
-            
+    print(sensor_label_list)       
     # Making the text header for which body segments have IMU data
     header_text = 'time\t'
     for label in sensor_label_list:
@@ -155,7 +158,7 @@ def readIMU(q, b, fake_online_data, init_time, signals_per_sensor, save_dir_init
     if fake_real_time:
         cal_data = imu_data
         imu_data = np.load(fake_online_data + fake_path) # load fake dataset
-        print(np.shape(imu_data))
+
         cal_data = imu_data[:quat_cal_offset,:]
         fake_data_len = imu_data.shape[0]
         print("Starting offline analysis for file with",fake_data_len,"samples")
@@ -186,11 +189,14 @@ def readIMU(q, b, fake_online_data, init_time, signals_per_sensor, save_dir_init
 
     b.put([sensor_number, rate, header_text, parallelize, save_folder, file_cnt, sim_len, fake_real_time,fake_data_len,]) # ready to start running
     if fake_real_time:
-        print(num_sensors)
+
         time.sleep(2.)
         for i in range(quat_cal_offset):# pull in real data and compute quats for init_time
             cal_data[i,:] = imu_data[0,:]
+
+            #currently initializing with a madgewick, to change later
         Qi, head_err, rot_mats = h.compute_quat(cal_data, len_sensor_list, quat_cal_offset, sensor_rot, num_sensors)
+
 
         q.put([time.time(), Qi, head_err]) # sending initialized info
         time_start = time.time()
@@ -200,14 +206,24 @@ def readIMU(q, b, fake_online_data, init_time, signals_per_sensor, save_dir_init
         sensor_vec = np.zeros(num_sensors*signals_per_sensor)
         start = q.get() # waiting for confirmation of sim Starting
         time.sleep(0.3)
-        print("imu shape:"+str(np.shape(imu_data[t,:])))
+        if useVQF:
+            vqf_list = [vqf.BasicVQF(0.02, tauAcc=1.0) for _ in range(len_sensor_list)]
+
         while(t < fake_data_len): # Pull data at the desired rate
             sensor_vec = imu_data[t,:]
             for i in range(len_sensor_list):
+                #changed code to run vqf quaternions, plot quaternion differences 
                 s_off = i*signals_per_sensor
                 accel = np.matmul(sensor_vec[s_off:s_off+3],rot_mats[i,:,:])
                 gyro = np.matmul(sensor_vec[s_off+3:s_off+6],rot_mats[i,:,:])
-                Qi[i,:] = madgwick.updateIMU(Qi[i,:], gyro, accel)
+                if useVQF:
+                    vqf_list[i].update(gyro, accel)
+                    Qi[i, :] = vqf_list[i].getQuat6D()
+
+                #add option to select madgwick or vqf
+                else:
+                    Qi[i,:] = madgwick.updateIMU(Qi[i,:], gyro, accel)
+
             while(q.qsize()>0):
                 time.sleep(0.003)
             q.put([time.time(), Qi])

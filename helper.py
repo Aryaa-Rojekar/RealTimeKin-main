@@ -2,6 +2,8 @@ import numpy as np
 import ahrs
 import time
 from ahrs.common.orientation import q2R
+import vqf
+
 
 # Function to write data from line_ind to a .sto file
 def quat2sto_single(sensor_data, header_text, file_dir, t_step, rate, sensor_ind_list = [4,4,2,3,0,1]):
@@ -18,7 +20,23 @@ def quat2sto_single(sensor_data, header_text, file_dir, t_step, rate, sensor_ind
         for j in sensor_ind_list:
             f.write("\t{},{},{},{}".format(sensor_data[j,0],sensor_data[j,1],sensor_data[j,2],sensor_data[j,3]))
         f.write("\n")
-
+def write_sto_header(file_dir, rate, header_text):
+    with open(file_dir, 'w') as f:  # Overwrites on purpose
+        f.write("DataRate={}\n".format(rate))
+        f.write("DataType=Quaternion\n")
+        f.write("version=3\n")
+        f.write("OpenSimVersion=4.2\n")
+        f.write("endheader\n")
+        f.write(header_text)
+def quat2sto_append(sensor_data, header_text, file_dir, t_step, rate, sensor_ind_list = [4,4,2,3,0,1],first=False):
+    if first:
+        write_sto_header(file_dir, rate, header_text)
+    
+    with open(file_dir, 'a') as f:
+        f.write("{}".format(t_step))
+        for j in sensor_ind_list:
+            f.write("\t{},{},{},{}".format(sensor_data[j, 0], sensor_data[j, 1], sensor_data[j, 2], sensor_data[j, 3]))
+        f.write("\n")
 # Function to read sto file to load fake real time data in numpy array
 def sto2quat(file_dir, lines = 3, offset = 6, num_sensors=8):
     sensor_data = np.zeros((num_sensors,lines,4))
@@ -38,7 +56,7 @@ def sto2quat(file_dir, lines = 3, offset = 6, num_sensors=8):
                             sensor_data[j-1,row_ind,k] = float(val)
     return times, sensor_data
 
-def compute_quat(all_data, len_sensor_list, quat_cal_offset, rot_inds, num_sensors=5, t_offset=0, signals_per_sensor=6, beta=0.2*np.ones(5), rate=60.0, verbose=False, beta_init=0.4):
+def compute_quat(all_data, len_sensor_list, quat_cal_offset, rot_inds, num_sensors=5, t_offset=0, signals_per_sensor=6, beta=0.2*np.ones(5), rate=60.0, verbose=False, beta_init=0.4,use_vqf=False):
     d2g = ahrs.common.DEG2RAD   # Constant to convert degrees to radians
     Qi = np.zeros((num_sensors,quat_cal_offset,4))
     Q = np.zeros((num_sensors,all_data.shape[0]-quat_cal_offset,4))
@@ -57,6 +75,7 @@ def compute_quat(all_data, len_sensor_list, quat_cal_offset, rot_inds, num_senso
     l_leg_rot = np.matmul(z_neg_90,y_180)
     rot_mats = np.zeros((len_sensor_list,3,3))
     for i in range(len_sensor_list): # define rotation type
+        print(rot_inds)
         if rot_inds[i] == 0: # hip, torso, head
             rot_mats[i,:,:] = hip_rot
         elif rot_inds[i] == 1: # left side
@@ -67,15 +86,27 @@ def compute_quat(all_data, len_sensor_list, quat_cal_offset, rot_inds, num_senso
             rot_mats[i,:,:] = foot_rot
 
     for i in range(len_sensor_list): # processing quaternions one sensor at a time
+        print(i)
         s_off = i*signals_per_sensor
         accel = np.matmul(all_data[:,s_off+t_offset:s_off+t_offset+3],rot_mats[i,:,:])
         gyro = np.matmul(all_data[:,s_off+t_offset+3:s_off+t_offset+6],rot_mats[i,:,:])
         #mag = np.matmul(all_data[:,s_off+t_offset+6:s_off+t_offset+9],rot_mats[i,:,:])
-        
+
+
+        #testing out the vqf filter
+
         # calibrating the initial quaternion with a large beta_init value
-        madgwick_i = ahrs.filters.Mahony(frequency=float(rate))
-        for t in range(1, quat_cal_offset):
-            Qi[i,t,:] = madgwick_i.updateIMU(Qi[i,t-1,:], gyro[0,:], accel[0,:])
+        if use_vqf:
+            vqf_list = [vqf.BasicVQF(0.02, tauAcc=3) for _ in range(len_sensor_list)]
+            vqf_list[i].update(gyro, accel)
+            Qi[i,t,:] = vqf_list[i].getQuat6D()
+
+        else:
+            madgwick_i = ahrs.filters.Mahony(frequency=float(rate))
+            for t in range(1, quat_cal_offset):
+
+                Qi[i,t,:] = madgwick_i.updateIMU(Qi[i,t-1,:], gyro[0,:], accel[0,:])
+
     quat_ang = np.zeros(num_sensors)
     for i in range(len_sensor_list):
         quat_ang[i],_ = orientMat(q2R(np.array(Qi[i,-1,:]))) # multiply rot_mats by the gyro correction angle to correct to same heading as pelvis? Then
